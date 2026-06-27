@@ -5,6 +5,9 @@ Como o vetor de estado é binário (11 bits → 2048 combinações possíveis),
 a tabela Q pode ser representada de forma exata como um dicionário.
 
 Tabela Q: estado (tupla de 11 ints) → array NumPy de 3 Q-valores
+
+
+Tem que refazer com o o novo tensor de input
 """
 
 import numpy as np

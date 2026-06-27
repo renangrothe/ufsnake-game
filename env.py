@@ -2,9 +2,9 @@
 env.py — Ambiente Snake compatível com Gymnasium
 Ponto de partida: implementação BFS em C (UFSKernel/snake)
 
-Espaço de estados : vetor de 11 valores binários (sem pixels)
+Espaço de estados : tensor 3D (7, 10, 10)
 Espaço de ações   : Discrete(3) — reto, direita, esquerda (relativo)
-Recompensas       : +10 maçã | -10 colisão | +1/-1 aproximação/afastamento
+Recompensas       : +30 maçã | -100 colisão | +0.1/-0.1 aproximação/afastamento | -0.1 por passo
 """
 
 import gymnasium as gym

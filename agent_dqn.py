@@ -142,15 +142,15 @@ class DQNAgent:
     def __init__(
         self,
         state_shape: tuple = (7, 10, 10),
-        action_size: int   = 3,
+        action_size: int = 3,
         lr: float = 1e-3,
         gamma: float = 0.99,
         epsilon:  float = 1.0,
         epsilon_min:  float = 0.05,
         epsilon_decay: float = 0.999,
-        buffer_capacity: int   = 100_000,
-        batch_size: int   = 1024,
-        target_update_freq: int   = 500,   # passos de treino entre sync
+        buffer_capacity: int = 100_000,
+        batch_size: int = 1024,
+        target_update_freq: int = 500,   # passos de treino entre sync
         device: Optional[str] = None,
     ):
         self.action_size = action_size
@@ -191,7 +191,7 @@ class DQNAgent:
         with torch.no_grad():
             s_t = torch.as_tensor(
                 state, dtype=torch.float32, device=self.device
-            ).unsqueeze(0)   # (11,) -> (1, 11)
+            ).unsqueeze(0)   # (7, 10, 10) -> (1, 7, 10, 10)
             return int(self.policy_net(s_t).argmax().item())
 
     def remember(
