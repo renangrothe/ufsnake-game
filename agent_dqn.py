@@ -211,6 +211,10 @@ class DQNAgent:
         elementwise_loss = torch.nn.functional.smooth_l1_loss(q_pred, q_target, reduction="none")
         loss = torch.mean(elementwise_loss * weights)
 
+        if torch.isnan(loss):
+            print("[DQN] Loss NaN detectado! Ignorando atualização...")
+            return None
+
         # Backpropagation
         self.optimizer.zero_grad()
         loss.backward()

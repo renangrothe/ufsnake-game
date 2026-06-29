@@ -21,6 +21,7 @@ def train_dqn(episodes=10000, resume_path=None):
     steps = 0
     episode_lengths = [] #armazena quantos passos durou cada ep
     best_avg_score = -float('inf')
+    CYCLE_LENGTH = 2000
     
     # Lógica de carregamento
     if resume_path and os.path.exists(resume_path):
