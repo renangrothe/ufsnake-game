@@ -108,6 +108,10 @@ class DQNAgent:
         self.per_beta = 0.4   # Peso inicial de correção (sobe para 1.0 ao longo do treino)
         self.per_beta_increment = 0.001
 
+        self.temperature = 1.0 # Valor inicial (exploração alta)
+        self.temp_min = 0.1 # Valor mínimo (exploração baixa)
+        self.temp_decay = 0.9995 # Decaimento por episódio (mais lento que o epsilon)
+
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
@@ -122,6 +126,13 @@ class DQNAgent:
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
 
+        # cosine annealing para lr, escapar de minimos locais com diferentes tamanhos de snake
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, 
+            T_max=10000,   # Ciclo a cada 10.000 passos de aprendizado (pode ajustar)
+            eta_min=1e-6   # LR mínima no final do ciclo
+        )
+
         # Configuração do Dicionário para a cpprb
         env_dict = {
             "obs": {"shape": state_shape},
@@ -134,16 +145,28 @@ class DQNAgent:
         # Inicializa o Prioritized Replay Buffer em C++
         self.buffer = PrioritizedReplayBuffer(buffer_capacity, env_dict, alpha=self.per_alpha)
 
-    def act(self, state: np.ndarray) -> int:
-        """epsilon-greedy com inferência na GPU (torch.no_grad para evitar grad desnecessário)."""
-        if random.random() < self.epsilon:
-            return random.randrange(self.action_size)
+    def decay_temperature(self) -> None:
+        self.temperature = max(self.temp_min, self.temperature * self.temp_decay)
 
+    def act(self, state: np.ndarray) -> int:
+        """
+        Boltzmann exploration (exploração baseada em probabilidades).
+        Quanto maior a temperatura (tau), mais exploratório.
+        """
         with torch.no_grad():
             s_t = torch.as_tensor(
                 state, dtype=torch.float32, device=self.device
             ).unsqueeze(0)   # (7, 10, 10) -> (1, 7, 10, 10)
-            return int(self.policy_net(s_t).argmax().item())
+
+            q_vals = self.policy_net(s_t).squeeze(0)  # shape: (3,)
+
+            # Se a temperatura for muito baixa, vira greedy puro (argmax)
+            # Se for alta, vira aleatório uniforme.
+            # Softmax com temperatura: divide os Q-values pela temperatura antes do softmax
+            probs = torch.softmax(q_vals / self.temperature, dim=-1)
+
+            # Amostra uma ação baseada nas probabilidades
+            return int(torch.multinomial(probs, 1).item())
 
     def remember(self, state, action, reward, next_state, done):
         # cpprb espera a adição em formato de dicionário
@@ -197,6 +220,8 @@ class DQNAgent:
         # quão "surpresa" a rede ficou
         self.buffer.update_priorities(sample["indexes"], td_errors)
 
+        self.scheduler.step() # scheduler controla a lr
+
         self._train_steps += 1
         if self._train_steps % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -214,6 +239,7 @@ class DQNAgent:
             "optimizer":   self.optimizer.state_dict(),
             "epsilon":     self.epsilon,
             "train_steps": self._train_steps,
+            "temperature": self.temperature,
             "episode":     episode, # Salvando o episódio atual
         }, path)
         print(f"[DQN] Checkpoint salvo → {path}")
@@ -223,6 +249,7 @@ class DQNAgent:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.policy_net.load_state_dict(ckpt["policy"])
         self.target_net.load_state_dict(ckpt["target"])
+        self.temperature = ckpt.get("temperature", self.temperature)
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.epsilon = ckpt.get("epsilon",     self.epsilon_min)
         self._train_steps = ckpt.get("train_steps", 0)

@@ -18,6 +18,8 @@ def train_dqn(episodes=10000, resume_path=None):
     
     start_episode = 1
     scores = []
+    steps = 0
+    episode_lengths = [] #armazena quantos passos durou cada ep
     best_avg_score = -float('inf')
     
     # Lógica de carregamento
@@ -36,10 +38,12 @@ def train_dqn(episodes=10000, resume_path=None):
         state, _ = env.reset()
         done = False
         truncated = False
+        steps = 0
         
         while not (done or truncated):
             action = agent.act(state)
             next_state, reward, done, truncated, info = env.step(action)
+            steps += 1
             
             # Armazena na memória da sumtree e treina
             agent.remember(state, action, reward, next_state, done)
@@ -56,15 +60,33 @@ def train_dqn(episodes=10000, resume_path=None):
             
         # agora so gasta a taxa de exploracao se a rede ja esta aprendendo 
         if agent.buffer.get_stored_size() > 10_000:
-            agent.decay_epsilon()
+            #agent.decay_epsilon()
+            agent.decay_temperature()
 
         scores.append(info['score'])
+        episode_lengths.append(steps)
         
         # Logs de progresso e salvamento
         if e % 50 == 0:
             avg_score = np.mean(scores[-50:])
-            print(f"Episódio: {e}/{episodes} | Score Médio (ultimos 50): {avg_score:.2f} | Epsilon: {agent.epsilon:.3f}")
-            
+            avg_length = np.mean(episode_lengths[-50:]) if episode_lengths else 0
+
+            # Pega a LR atual do otimizador
+            current_lr = agent.optimizer.param_groups[0]['lr']
+
+            # Pega o beta do PER (correção de viés)
+            current_beta = agent.per_beta
+
+            # Pega a temperatura (se você migrou para Boltzmann)
+            current_temp = agent.temperature
+
+            print(f"Ep: {e:6d}/{episodes} | "
+                f"Score: {avg_score:5.2f} | "
+                f"Steps: {avg_length:6.1f} | "
+                f"Temp: {current_temp:.4f} | "
+                f"Beta: {current_beta:.3f} | "
+                f"LR: {current_lr:.2e}")
+
             # Salva apenas se for o melhor modelo até agora
             if warmup and avg_score > best_avg_score:
                 best_avg_score = avg_score
@@ -74,6 +96,11 @@ def train_dqn(episodes=10000, resume_path=None):
         # Sobrescreve o mesmo arquivo periódico
         if e % 200 == 0:
             agent.save("dqn_latest.pth", episode=e)
+
+        # if e % CYCLE_LENGTH == 0 and agent.epsilon <= 0.1: # favorece a exploracao, visando remover de possiveis minimos locais
+        #     agent.epsilon = 0.5
+        if e % CYCLE_LENGTH == 0 and agent.temperature <= agent.temp_min + 0.05:
+            agent.temperature = 1.0   # reseta para explorar novamente
             
     agent.save("dqn_final.pth", episode=episodes)
     print("Treinamento finalizado.")
