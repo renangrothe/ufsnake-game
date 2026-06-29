@@ -66,7 +66,7 @@ def train_dqn(episodes=10000, resume_path=None):
             print(f"Episódio: {e}/{episodes} | Score Médio (ultimos 50): {avg_score:.2f} | Epsilon: {agent.epsilon:.3f}")
             
             # Salva apenas se for o melhor modelo até agora
-            if warmup_concluido and avg_score > best_avg_score:
+            if warmup and avg_score > best_avg_score:
                 best_avg_score = avg_score
                 agent.save("dqn_best.pth", episode=e)
                 print(f" -> Novo recorde alcançado! Modelo salvo em 'dqn_best.pth'")
