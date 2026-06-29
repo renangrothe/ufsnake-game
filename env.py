@@ -13,7 +13,6 @@ from gymnasium import spaces
 from collections import deque
 from enum import IntEnum
 
-
 class Direction(IntEnum):
     RIGHT = 0
     DOWN  = 1
@@ -48,13 +47,13 @@ class SnakeEnv(gym.Env):
     """
 
     metadata   = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
-    BOARD_SIZE = 10   # área jogável (sem bordas extras)
-    CELL_PX    = 50   # pixels por célula no render
+    BOARD_SIZE = 10 # área jogável (sem bordas extras)
+    CELL_PX    = 50 # pixels por célula no render
 
     def __init__(self, render_mode=None):
         super().__init__()
         self.render_mode = render_mode
-        self.action_space      = spaces.Discrete(3)
+        self.action_space = spaces.Discrete(3)
         # 7 canais: cabeça, corpo, maçã, + 4 one‑hot para direção
         self.observation_space = spaces.Box(0.0, 1.0, shape=(7, self.BOARD_SIZE, self.BOARD_SIZE), dtype=np.float32)
         self._window = None
@@ -75,46 +74,61 @@ class SnakeEnv(gym.Env):
         return self._state(), {}
 
     def step(self, action: int):
+        """ 
+        a função de step foi atualizada para implementar a tecnica descrita no seguinte artigo:
+
+        Policy invariance under reward transformations: Theory and application to reward shaping
+
+        Cada posicao no tabuleiro e associada a um potencial, e o reward shaping e aplicado na diferenca entre o potencial previsto e observado
+        """
+
         self._steps_no_food += 1
 
-        # Atualiza direção com base na ação relativa
+        # Movimentação
         idx = CLOCKWISE.index(self.direction)
-        if   action == 1: self.direction = CLOCKWISE[(idx + 1) % 4] # direita
-        elif action == 2: self.direction = CLOCKWISE[(idx - 1) % 4] # esquerda
-        # action == 0 mantém a direção atual
-
-        dr, dc   = DIR_VEC[self.direction]
-        head_r, head_c = self.snake[0] # extrai a cabeça
+        if   action == 1: self.direction = CLOCKWISE[(idx + 1) % 4]
+        elif action == 2: self.direction = CLOCKWISE[(idx - 1) % 4]
+        
+        dr, dc = DIR_VEC[self.direction]
+        head_r, head_c = self.snake[0]
         new_head = (head_r + dr, head_c + dc)
 
-        # Distância de Manhattan antes do movimento (reward shaping)
-        d_before = self._manhattan(self.snake[0])
+        # Calcula o Potencial do estado atual Phi(s)
+        phi_s = -self._manhattan(self.snake[0])
 
-        # Verifica colisão com parede ou corpo
+        # Verifica condições de colisão
         r, c = new_head
         if (r < 0 or r >= self.BOARD_SIZE or
                 c < 0 or c >= self.BOARD_SIZE or
                 new_head in set(self.snake)):
-            return self._state(), -100.0, True, False, {"score": self.score}
+            # Retorna apenas a punição real. Sem shaping no estado terminal.
+            return self._state(), -10.0, True, False, {"score": self.score}
 
-        # Avança a cobra
+        # Avança a cobra e calcula o novo Potencial Phi(s')
         self.snake.appendleft(new_head)
-        d_after = self._manhattan(new_head)
+        phi_s_prime = -self._manhattan(new_head)
 
-        if new_head == self.food:       # comeu a maçã
-            self.score          += 1
-            self._steps_no_food  = 0
-            reward = 30.0
+        gamma = 0.99 
+
+        # Avalia a Recompensa Real + Função de Shaping (F)
+        if new_head == self.food: 
+            self.score += 1
+            self._steps_no_food = 0
+            
+            # Recompensa real da maca. Nao aplicamos shaping aqui pois o estado de pontuacao reseta o alvo de distancia da proxima iteracao
+            reward = 10.0 
             self._place_food()
-        else:                           # movimento normal
-            self.snake.pop()            # remove a cauda
-            reward = 0.1 if d_after < d_before else -0.1
-            reward -= 0.01
+        else:
+            self.snake.pop() # remove a cauda
+            
+            # Custo fixo de tempo (real) + Diferença de Potencial (shaping)
+            # F(s, s') = gamma * Phi(s') - Phi(s)
+            reward = -0.01 + (gamma * phi_s_prime - phi_s)
 
-        # Truncate previne loops infinitos (cobra presa em ciclo)
-        truncated = self._steps_no_food > 300 * len(self.snake)
+        # Truncate previne loops infinitos com o limite de casas no tabuleiro
+        truncated = self._steps_no_food > 100 * len(self.snake)
 
-        return self._state(), reward, False, truncated, {"score": self.score}
+        return self._state(), float(reward), False, truncated, {"score": self.score}
 
     def render(self):
         if   self.render_mode == "human":     self._render_human()

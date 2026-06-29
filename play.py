@@ -18,10 +18,10 @@ def get_episode_number(filename):
 def play_game(model_path=None):
     # fallback para encontrar o melhor modelo
     if model_path is None:
-        if os.path.exists("dqn_final.pth"):
-            model_path = "dqn_final.pth"
+        if os.path.exists("dqn_best.pth"):
+            model_path = "dqn_best.pth"
         else:
-            checkpoints = glob.glob("dqn_checkpoint_ep*.pth")
+            checkpoints = glob.glob("checkpoints_bkp/commit-fase-2/dqn_checkpoint_ep*.pth")
             if checkpoints:
                 # determinar o maior número
                 model_path = max(checkpoints, key=get_episode_number)

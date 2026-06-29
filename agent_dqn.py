@@ -19,6 +19,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from cpprb import PrioritizedReplayBuffer
 
 
 # ═══════════════════════════════════════════════════════════════════════ #
@@ -63,67 +64,6 @@ class QNetworkCNN(nn.Module):
         return q_values
 
 # ═══════════════════════════════════════════════════════════════════════ #
-#  Replay Buffer pré-alocado na GPU                                        #
-# ═══════════════════════════════════════════════════════════════════════ #
-
-class ReplayBuffer:
-    """
-    Buffer circular de experiências (s, a, r, s', done) pré-alocado na GPU.
-
-    Por que pré-alocar?
-
-    A abordagem convencional (deque + stack no batch) faz N alocações de
-    tensor por passo e uma grande transferência CPU para GPU por batch.
-    Aqui, toda a memória já está na GPU; cada push() faz apenas uma
-    transferência de 1 vetor/escalar por campo — ~5× menos overhead.
-    """
-
-    def __init__(self, capacity: int, state_shape: tuple, device: torch.device):
-        self.capacity = capacity
-        self.device   = device
-        self._ptr     = 0
-        self._size    = 0
-
-        self.s  = torch.zeros((capacity, *state_shape), dtype=torch.float32, device=device)
-        self.a  = torch.zeros( capacity, dtype=torch.long, device=device)
-        self.r  = torch.zeros( capacity, dtype=torch.float32, device=device)
-        self.s_ = torch.zeros((capacity, *state_shape), dtype=torch.float32, device=device)
-        self.d  = torch.zeros( capacity, dtype=torch.float32, device=device)
-
-    def push(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        next_state: np.ndarray,
-        done: bool,
-    ) -> None:
-        """Armazena uma transição no buffer circular. Uma transferência por campo."""
-        i = self._ptr % self.capacity
-        self.s [i] = torch.as_tensor(state, dtype=torch.float32).to(self.device)
-        self.a [i] = action
-        self.r [i] = reward
-        self.s_[i] = torch.as_tensor(next_state, dtype=torch.float32).to(self.device)
-        self.d [i] = float(done)
-        self._ptr  += 1
-        self._size  = min(self._size + 1, self.capacity)
-
-    def sample(self, batch_size: int):
-        """Amostragem uniforme diretamente nos tensores GPU."""
-        idx = torch.randint(0, self._size, (batch_size,), device=self.device)
-        return (
-            self.s [idx],
-            self.a [idx],
-            self.r [idx],
-            self.s_[idx],
-            self.d [idx],
-        )
-
-    def __len__(self) -> int:
-        return self._size
-
-
-# ═══════════════════════════════════════════════════════════════════════ #
 #  Agente DQN                                                              #
 # ═══════════════════════════════════════════════════════════════════════ #
 
@@ -139,6 +79,7 @@ class DQNAgent:
             target = r + γ · target_net(s', ação*) target_net avalia
     """
 
+    # inicializacao substitui o replay buffer antigo pelo do PER
     def __init__(
         self,
         state_shape: tuple = (7, 10, 10),
@@ -149,8 +90,8 @@ class DQNAgent:
         epsilon_min:  float = 0.05,
         epsilon_decay: float = 0.999,
         buffer_capacity: int = 100_000,
-        batch_size: int = 1024,
-        target_update_freq: int = 500,   # passos de treino entre sync
+        batch_size: int = 128,
+        target_update_freq: int = 500,
         device: Optional[str] = None,
     ):
         self.action_size = action_size
@@ -162,26 +103,36 @@ class DQNAgent:
         self.target_update_freq = target_update_freq
         self._train_steps = 0
 
-        # Seleciona CUDA se disponível
+        # Parâmetros do PER
+        self.per_alpha = 0.6  # Quão agressiva é a priorização
+        self.per_beta = 0.4   # Peso inicial de correção (sobe para 1.0 ao longo do treino)
+        self.per_beta_increment = 0.001
+
         if device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
         print(f"[DQN] Device: {self.device}")
-        if self.device.type == "cuda":
-            print(f"[DQN] GPU: {torch.cuda.get_device_name(self.device)}")
 
         # Redes
         self.policy_net = QNetworkCNN(action_size).to(self.device)
         self.target_net = QNetworkCNN(action_size).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.target_net.eval() # target_net: apenas inferência, nunca acumula grad
+        self.target_net.eval()
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
-        # Huber Loss (SmoothL1)
-        self.loss_fn = nn.SmoothL1Loss()
 
-        self.buffer = ReplayBuffer(buffer_capacity, state_shape, self.device)
+        # Configuração do Dicionário para a cpprb
+        env_dict = {
+            "obs": {"shape": state_shape},
+            "act": {"shape": 1, "dtype": int}, # Ação é escalar
+            "rew": {},
+            "next_obs": {"shape": state_shape},
+            "done": {}
+        }
+        
+        # Inicializa o Prioritized Replay Buffer em C++
+        self.buffer = PrioritizedReplayBuffer(buffer_capacity, env_dict, alpha=self.per_alpha)
 
     def act(self, state: np.ndarray) -> int:
         """epsilon-greedy com inferência na GPU (torch.no_grad para evitar grad desnecessário)."""
@@ -194,48 +145,58 @@ class DQNAgent:
             ).unsqueeze(0)   # (7, 10, 10) -> (1, 7, 10, 10)
             return int(self.policy_net(s_t).argmax().item())
 
-    def remember(
-        self,
-        state: np.ndarray,
-        action: int,
-        reward: float,
-        next_state: np.ndarray,
-        done: bool,
-    ) -> None:
-        self.buffer.push(state, action, reward, next_state, done)
+    def remember(self, state, action, reward, next_state, done):
+        # cpprb espera a adição em formato de dicionário
+        self.buffer.add(obs=state, act=action, rew=reward, next_obs=next_state, done=done)   
 
     def learn(self) -> Optional[float]:
-        """
-        Um passo de treino (backpropagation).
-
-        Retorna o valor da loss ou None se o buffer ainda não tem amostras suficientes.
-        """
-        if len(self.buffer) < self.batch_size:
+        # get_stored_size() pega o número de elementos atuais no buffer da cpprb
+        if self.buffer.get_stored_size() < self.batch_size:
             return None
 
-        s, a, r, s_, d = self.buffer.sample(self.batch_size)
+        # Amostragem pela SumTree
+        # O beta corrige o viés de amostragem viciado do PER
+        sample = self.buffer.sample(self.batch_size, beta=self.per_beta)
+        
+        # Aumenta o beta gradativamente em direção a 1.0
+        self.per_beta = min(1.0, self.per_beta + self.per_beta_increment)
 
-        # Q(s, a) — valores previstos pela policy_net
-        # gather: seleciona a coluna correspondente à ação tomada -> shape [batch]
-        q_pred = self.policy_net(s).gather(1, a.unsqueeze(1)).squeeze(1)
+        # Transferência para a GPU
+        s = torch.as_tensor(sample["obs"], dtype=torch.float32, device=self.device)
+        a = torch.as_tensor(sample["act"], dtype=torch.long, device=self.device)
+        r = torch.as_tensor(sample["rew"], dtype=torch.float32, device=self.device).squeeze(-1)
+        s_ = torch.as_tensor(sample["next_obs"], dtype=torch.float32, device=self.device)
+        d = torch.as_tensor(sample["done"], dtype=torch.float32, device=self.device).squeeze(-1)
+        
+        # Pesos de correção (Importance Sampling) para a Loss
+        weights = torch.as_tensor(sample["weights"], dtype=torch.float32, device=self.device).squeeze(-1)
 
-        # Double DQN target sem grad (target_net é read-only durante treino)
+        # Matemática do Double DQN
+        q_pred = self.policy_net(s).gather(1, a).squeeze(1)
+
         with torch.no_grad():
-            # policy_net escolhe qual ação tomar em s'
             best_actions = self.policy_net(s_).argmax(1, keepdim=True)
-            # target_net avalia o Q dessa ação
-            q_next   = self.target_net(s_).gather(1, best_actions).squeeze(1)
+            q_next = self.target_net(s_).gather(1, best_actions).squeeze(1)
             q_target = r + self.gamma * q_next * (1.0 - d)
 
-        loss = self.loss_fn(q_pred, q_target)
+        # Cálculo do TD Error absoluto para atualizar a SumTree
+        # Fazemos detach() e movemos para CPU pois a cpprb precisa disso
+        td_errors = torch.abs(q_target - q_pred).detach().cpu().numpy()
 
+        # Cálculo da Loss com os pesos do PER
+        # Em vez de SmoothL1Loss substituimos manualmente para aplicar o peso por amostra
+        elementwise_loss = torch.nn.functional.smooth_l1_loss(q_pred, q_target, reduction="none")
+        loss = torch.mean(elementwise_loss * weights)
+
+        # Backpropagation
         self.optimizer.zero_grad()
         loss.backward()
-        # Gradient clipping previne explosão de gradientes em episódios longos
         torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
         self.optimizer.step()
 
-        # Sincroniza target_net a cada N passos de treino
+        # quão "surpresa" a rede ficou
+        self.buffer.update_priorities(sample["indexes"], td_errors)
+
         self._train_steps += 1
         if self._train_steps % self.target_update_freq == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -246,17 +207,18 @@ class DQNAgent:
         """Decai epsilon após cada episódio (chamar no final do episódio)."""
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
-    def save(self, path: str = "dqn.pth") -> None:
+    def save(self, path: str = "dqn.pth", episode: int = 0) -> None:
         torch.save({
             "policy":      self.policy_net.state_dict(),
             "target":      self.target_net.state_dict(),
             "optimizer":   self.optimizer.state_dict(),
             "epsilon":     self.epsilon,
             "train_steps": self._train_steps,
+            "episode":     episode, # Salvando o episódio atual
         }, path)
         print(f"[DQN] Checkpoint salvo → {path}")
 
-    def load(self, path: str = "dqn.pth") -> None:
+    def load(self, path: str = "dqn.pth") -> int:
         # weights_only=False: checkpoint contém dicts com state_dicts + metadados
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.policy_net.load_state_dict(ckpt["policy"])
@@ -265,5 +227,10 @@ class DQNAgent:
         self.epsilon = ckpt.get("epsilon",     self.epsilon_min)
         self._train_steps = ckpt.get("train_steps", 0)
         self.target_net.eval()
+        
+        episode = ckpt.get("episode", 0) # Recuperando o episódio
+        
         print(f"[DQN] Checkpoint carregado ← {path}  "
-              f"(passo {self._train_steps}, ε={self.epsilon:.4f})")
+              f"(passo {self._train_steps}, ε={self.epsilon:.4f}, episódio {episode})")
+        
+        return episode # Retornando para o loop de treino
