@@ -90,7 +90,7 @@ class DQNAgent:
         epsilon_min:  float = 0.05,
         epsilon_decay: float = 0.999,
         buffer_capacity: int = 100_000,
-        batch_size: int = 128,
+        batch_size: int = 256,
         target_update_freq: int = 500,
         device: Optional[str] = None,
     ):

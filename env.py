@@ -48,7 +48,7 @@ class SnakeEnv(gym.Env):
 
     metadata   = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
     BOARD_SIZE = 10 # área jogável (sem bordas extras)
-    CELL_PX    = 50 # pixels por célula no render
+    CELL_PX = 50 # pixels por célula no render
 
     def __init__(self, render_mode=None):
         super().__init__()
